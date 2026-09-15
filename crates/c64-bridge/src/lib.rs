@@ -24,6 +24,7 @@ use trx64_core::keyboard::JoystickState;
 use trx64_core::vic::VicMemView;
 use trx64_core::{AccessCtx, BusKind, CpuHistoryRing, DeltaRing, Machine, Observer};
 use ue2_core::c64host::{C64Backend, C64CartSlot, C64Drive, C64Frame, C64Rom, CartSlotInfo};
+use ue2_core::devices::iec::UciHandle;
 
 use cart::{CartHandle, CartLogic, CartProxy, RunHints};
 use clock::Clock;
@@ -92,6 +93,8 @@ pub struct Trx64Backend {
     sid: sid::Sid,
     /// W4-DRIVE: drive A on TRX64's drive 8 (drive.rs).
     drive: drive::DriveA,
+    uci: UciHandle,  // placeholder: a fresh, disabled UciShared until the top-level wiring shares
+                      // the real one with the firmware-side IoMap (S14 §11 Phase 2, next step).
 }
 
 impl Trx64Backend {
@@ -145,6 +148,7 @@ impl Trx64Backend {
             palette: Palette::default(),
             sid,
             drive,
+	    uci: UciHandle::default(),
         }
     }
 
@@ -161,11 +165,7 @@ impl Trx64Backend {
     /// Plug the cartridge, under the forced ULTIMAX decode when set, into TRX64 and re-run its PLA. Without a cartridge
     /// type and without the forced decode the slot stays empty, so TRX64 runs without any cartridge call.
     fn install_cart(&mut self) {
-        // CARTSLOT: a cartridge in the physical expansion port attaches the proxy too (slot.rs).
-        let attached = self.ultimax || self.cart.with(|c| c.present()) || self.slot.with(|s| s.physical().is_some());
-        self.m.cartridge = attached.then(|| {
-            Box::new(CartProxy::with_slot(self.cart.clone(), self.slot.clone(), self.ultimax)) as Box<dyn CartMapper>
-        });
+        self.m.cartridge = Some(Box::new(CartProxy::with_slot(self.cart.clone(), self.slot.clone(), self.ultimax, self.uci.clone())) as Box<dyn CartMapper>);
         self.update_pla();
     }
 

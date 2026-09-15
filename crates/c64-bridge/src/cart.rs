@@ -19,6 +19,8 @@
 use std::cell::UnsafeCell;
 use std::sync::Arc;
 
+use ue2_core::devices::iec::UciHandle;
+
 use trx64_core::cart::{BankInfo, CartLines, CartMapper, CartState, MapperType};
 
 use crate::cart_eeprom::Eeprom;
@@ -820,22 +822,25 @@ pub struct CartProxy {
     cart: CartHandle,
     slot: SlotHandle,
     forced_ultimax: bool,
+    uci: UciHandle,
 }
 
 impl CartProxy {
-    /// The internal logic alone, with an empty expansion port.
+    /// The internal logic alone, with an empty expansion port and a disabled UCI.
     #[cfg(test)]
     pub fn new(cart: CartHandle, forced_ultimax: bool) -> Self {
-        Self::with_slot(cart, SlotHandle::default(), forced_ultimax)
+        Self::with_slot(cart, SlotHandle::default(), forced_ultimax, UciHandle::default())
     }
 
-    /// The internal logic and the expansion port `slot`.
-    pub fn with_slot(cart: CartHandle, slot: SlotHandle, forced_ultimax: bool) -> Self {
-        CartProxy { cart, slot, forced_ultimax }
+    /// The internal logic and the expansion port `slot`, and the UCI bridge `uci` — all three
+    /// arbitrate the same $DE00-$DFFF window (S14 §11 Phase 2).
+    pub fn with_slot(cart: CartHandle, slot: SlotHandle, forced_ultimax: bool, uci: UciHandle) -> Self {
+        CartProxy { cart, slot, forced_ultimax, uci }
     }
 }
 
 impl CartMapper for CartProxy {
+
     fn mapper_type(&self) -> MapperType {
         match self.get_lines() {
             CartLines { exrom: 0, game: 0 } => MapperType::Normal16k,
@@ -851,6 +856,12 @@ impl CartMapper for CartProxy {
     }
 
     fn read(&mut self, address: u16, bank_info: &BankInfo, clk: u64) -> Option<u8> {
+        {
+            let mut u = self.uci.lock().unwrap();
+            if let Some(off) = u.c64_claims(address) {
+                return Some(u.c64_read(off));
+            }
+        }
         self.slot.with(|s| s.read(&self.cart, address, bank_info, clk))
     }
 
@@ -858,7 +869,15 @@ impl CartMapper for CartProxy {
         self.slot.with(|s| s.peek(&self.cart, address, bank_info))
     }
 
+    
     fn write(&mut self, address: u16, value: u8, bank_info: &BankInfo, clk: u64) -> bool {
+        {
+            let mut u = self.uci.lock().unwrap();
+            if let Some(off) = u.c64_claims(address) {
+                u.c64_write(off, value); // freeze-line return value: future work (S14 §11 Phase 2 note)
+                return true; // consumed: doesn't fall through to RAM (trx64-core cart.rs:363-365)
+            }
+        }
         let forced = self.forced_ultimax;
         self.slot.with(|s| s.write(&self.cart, address, value, bank_info, clk, forced))
     }
