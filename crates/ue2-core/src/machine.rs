@@ -12,6 +12,7 @@ use std::path::PathBuf;
 use crate::bus::{Access, SystemBus, IO_BIT, RAM_MASK};
 use crate::c64host::{C64Backend, C64CartSlot};
 use crate::devices::overlay::{Overlay, REG_TRANSPARENCY};
+use crate::devices::iec::UciHandle;
 use crate::devices::{self, c64::C64Port, itu::Itu, u64io::U64Io};
 use crate::host::{DisplaySnapshot, HostInput};
 use crate::loader;
@@ -202,6 +203,9 @@ pub struct Machine {
     pub cfg: MachineConfig,
     pub breakpoints: Vec<u32>,
     pub trace: TraceRing,
+    /// The UCI bridge's shared state (S14 §11 Phase 2) — clone this into `Trx64Backend::new`
+    /// so the C64-visible side and this firmware-visible side agree on one `UciShared`.
+    pub uci: UciHandle,
     hooks: FaultHooks,
     /// Earliest device `next_event`; recomputed after IO accesses, ticks and host input.
     next_deadline: u64,
@@ -217,7 +221,7 @@ impl Machine {
     pub fn new(cfg: MachineConfig) -> anyhow::Result<Self> {
         anyhow::ensure!(cfg.clocks_per_insn > 0, "clocks_per_insn must be at least 1, or emulated time stands still");
         let mut bus = SystemBus::new();
-        devices::install_all(&mut bus.io, &cfg);
+        let uci = devices::install_all(&mut bus.io, &cfg);
         let fw = loader::load_firmware(&cfg.elf, &mut bus.ram)?;
         let symbols = match fw.format {
             loader::ImageFormat::Elf => Symbols::from_elf(&cfg.elf)?,
@@ -230,12 +234,13 @@ impl Machine {
                 Symbols::empty()
             }
         };
-        Ok(Self::from_parts(cfg, bus, fw.entry, symbols))
+        Ok(Self::from_parts(cfg, bus, fw.entry, symbols, uci))
     }
 
     /// Machine around an already populated bus: registers 0, `pc = entry`, log flags applied to the bus, fault
-    /// hooks resolved from `symbols` when `cfg.halt_on_fault`.
-    pub fn from_parts(cfg: MachineConfig, mut bus: SystemBus, entry: u32, symbols: Symbols) -> Self {
+    /// hooks resolved from `symbols` when `cfg.halt_on_fault`. `uci` is whatever `devices::install_all` returned
+    /// when `bus` was built — callers that build `bus` by hand must pass the matching handle through.
+    pub fn from_parts(cfg: MachineConfig, mut bus: SystemBus, entry: u32, symbols: Symbols, uci: UciHandle) -> Self {
         bus.trace_io = cfg.log.io;
         bus.log_unmapped = cfg.log.unmapped;
         let hooks = if cfg.halt_on_fault { FaultHooks::resolve(&symbols, &bus.ram) } else { FaultHooks::NONE };
@@ -247,6 +252,7 @@ impl Machine {
             cfg,
             breakpoints: Vec::new(),
             trace: TraceRing::default(),
+	    uci,
             hooks,
             next_deadline,
             irqs: 0,
@@ -951,8 +957,8 @@ mod tests {
         use crate::c64host::mock::{Call, Mock};
 
         let mut bus = SystemBus::new();
-        devices::install_all(&mut bus.io, &cfg());
-        let mut m = Machine::from_parts(cfg(), bus, 0x30000, Symbols::empty());
+	let uci = devices::install_all(&mut bus.io, &cfg());
+        let mut m = Machine::from_parts(cfg(), bus, 0x30000, Symbols::empty(), uci);
         assert_eq!(m.display().c64, None, "no C64 attached");
         m.bus.now = 1234;
         let mock = Mock::default();

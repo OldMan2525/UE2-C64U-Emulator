@@ -378,7 +378,7 @@ mod tests {
     #[test]
     fn install_all_no_overlap() {
         let mut map = IoMap::new();
-        install_all(&mut map, &cfg());
+        let _ = install_all(&mut map, &cfg());
         for addr in [0x1002_1806, 0x1002_8000, 0x1004_0001, 0x1005_D012, 0x1006_0400, 0x1006_082F, 0x1008_07F2, 0x1010_000C, 0x1010_0701, 0x1018_A000] {
             assert!(map.resolve(addr).is_some(), "{addr:#010x} unmapped");
         }

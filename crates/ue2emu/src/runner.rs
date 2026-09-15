@@ -209,7 +209,7 @@ fn attach_trx64_audio(
 ) -> Result<()> {
     #[cfg(feature = "trx64")]
     {
-        let mut c64 = c64_bridge::Trx64Backend::new(&machine.cfg.rom_dir);
+        let mut c64 = c64_bridge::Trx64Backend::new(&machine.cfg.rom_dir, machine.uci.clone());
         c64.set_sid_socket1(armsid);
         if let Some(sink) = sink {
             c64.set_audio(sink.rate(), Box::new(sink));

@@ -103,7 +103,7 @@ impl Trx64Backend {
     /// Unless `TRX64_CPUHISTORY` is set, TRX64's reverse-debug rings are switched off (a per-instruction cost) and
     /// kept at one entry instead of their default depth (about 110 MB). An explicit `TRX64_CPUHISTORY` leaves both to
     /// TRX64.
-    pub fn new(rom_dir: &Path) -> Self {
+    pub fn new(rom_dir: &Path, uci: UciHandle) -> Self {
         let rings_off = std::env::var_os(CPUHISTORY_ENV).is_none();
         if rings_off {
             std::env::set_var(CPUHISTORY_ENV, "0");
@@ -148,7 +148,7 @@ impl Trx64Backend {
             palette: Palette::default(),
             sid,
             drive,
-	    uci: UciHandle::default(),
+	    uci,
         }
     }
 

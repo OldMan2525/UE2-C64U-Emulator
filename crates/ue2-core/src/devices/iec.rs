@@ -265,8 +265,10 @@ impl UciShared {
             0x01 => {
                 if val & 0x80 == 0 {
                     self.enabled = val & 0x01 != 0;
+		    eprintln!("uci: fw_write(0x01, {val:#04x}) -> enabled={}", self.enabled); //rix debug
                 } else {
                     self.bus_id = val & 0x1F;
+		    eprintln!("uci: fw_write(0x01, {val:#04x}) -> bus_id={:#04x}", self.bus_id); //rix debug
                 }
             }
             0x02 => {
@@ -383,14 +385,16 @@ const ACIA: &[Span] = &[
 /// idle = FIFO empty (bit7), not enabled.
 const TAPE_PLAY: &[Span] = &[span(0x000, 0x1000, Reg::Const(0x80))];
 
-pub fn install(map: &mut IoMap, _cfg: &MachineConfig) {
+pub fn install(map: &mut IoMap, _cfg: &MachineConfig) -> UciHandle {
     add_table(map, 0x1002_8000, 0x1000, "iec", IEC);
-    map.add(0x1004_4000, 0x1000, Box::new(UciDevice::new(Arc::new(Mutex::new(UciShared::default())))));
+    let uci = UciHandle::default();
+    map.add(0x1004_4000, 0x1000, Box::new(UciDevice::new(uci.clone())));
     add_table(map, 0x1004_A000, 0x1000, "acia", ACIA);
     add_table(map, 0x100A_0000, 0x1000, "tape-play", TAPE_PLAY);
     // C2N record 0x100C0000: RECORD_STATUS 0 (bit7 = FIFO non-empty) and FIFO reads 0, so `flush()`
     // (tape_recorder.cc:250-262) exits and ITU bit 3 stays low (00 §2 C27, 11 H8/H16).
     add_table(map, 0x100C_0000, 0x1000, "tape-record", &[]);
+    uci
 }
 
 #[cfg(test)]

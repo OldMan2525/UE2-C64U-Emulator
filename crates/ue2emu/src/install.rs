@@ -153,7 +153,7 @@ fn build(args: &InstallArgs) -> Result<Machine> {
     cfg.flash_image = Some(args.flash.clone());
     cfg.overlay_ui = false;
     let mut bus = SystemBus::new();
-    devices::install_all(&mut bus.io, &cfg);
+    let uci = devices::install_all(&mut bus.io, &cfg);
     let fw = loader::load_updater(&cfg.elf, &mut bus.ram)?;
     let symbols = match fw.format {
         ImageFormat::Elf => Symbols::from_elf(&cfg.elf)?,
@@ -161,7 +161,7 @@ fn build(args: &InstallArgs) -> Result<Machine> {
     };
     let c64_name = if c64 { "trx64" } else { "none" };
     eprintln!("install: {} ({:?}), entry {:#010x}, C64 {c64_name}", cfg.elf.display(), fw.format, fw.entry);
-    let mut machine = Machine::from_parts(cfg, bus, fw.entry, symbols);
+    let mut machine = Machine::from_parts(cfg, bus, fw.entry, symbols, uci);
     if c64 {
         crate::runner::attach_trx64(&mut machine, args.cart_slot.as_ref())?;
     }
