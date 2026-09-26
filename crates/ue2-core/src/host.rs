@@ -26,6 +26,11 @@ pub enum HostInput {
     UsbMouse { dx: i32, dy: i32, wheel: i32, buttons: u8 },
     /// C64 RESTORE key: NMI level while held (docs/specs/S14-c64-trx64.md §6).
     Restore(bool),
+    /// S37: configure `MATRIX_WASD_TO_JOY` from a script instead of poking `0x1010_030B`: `codes` are the
+    /// up/down/left/right keyCodes (`row * 8 + col`, 0xFF for "no key"), `port` (1 or 2) is which control port
+    /// they drive — `C64Port::set_wasd_to_joy_port`'s docs cover why that's an argument here and not fixed.
+    /// `fire` is `C64Port::set_wasd_fire`'s ue2emu-only extension, not part of the MATRIX_WASD_TO_JOY register.
+    WasdToJoy { port: u8, codes: [u8; 4], fire: u8 },
 }
 
 /// Everything a renderer needs to draw the overlay UI. Filled by `devices::overlay::Overlay::snapshot`.

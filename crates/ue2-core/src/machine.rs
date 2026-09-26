@@ -613,6 +613,13 @@ impl Machine {
                     dev.set_joystick(port, lines);
                 }
             }
+            HostInput::WasdToJoy { port, codes, fire } => {
+                if let Some(dev) = io.get_mut::<C64Port>() {
+                    dev.set_wasd_to_joy(codes);
+                    dev.set_wasd_fire(fire);
+                    dev.set_wasd_to_joy_port(port);
+                }
+            }
             HostInput::MenuButton(pressed) => {
                 if let Some(dev) = io.get_mut::<Itu>() {
                     dev.set_menu_button(pressed);

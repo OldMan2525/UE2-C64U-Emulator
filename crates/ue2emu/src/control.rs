@@ -103,6 +103,9 @@ pub enum ControlCmd {
     Joy(u8, u8, u64),
     /// S36: `joy-hold`, `joy-release` and `joy <port> none`: the port's lines until the next change.
     JoySet(u8, u8),
+    /// S37: `wasd-joy <port> <up> <down> <left> <right> [fire]`: port, four keyCodes (or `none`, 0xFF), then an
+    /// optional fire keyCode (`none`/omitted also 0xFF).
+    WasdToJoy(u8, [u8; 4], u8),
     /// S32: `usbmouse <dx> <dy> [buttons]`: move the USB mouse and set its buttons (bit 0 left, 1 right, 2 middle).
     UsbMouse(i32, i32, u8),
     Screen,
@@ -276,6 +279,24 @@ pub fn parse_line(line: &str) -> Result<Option<ControlCmd>, String> {
         "joy-release" => {
             arity(1, 1)?;
             ControlCmd::JoySet(joy_port(args[0])?, 0xFF)
+        }
+        "wasd-joy" => {
+            arity(5, 6)?;
+            let port = joy_port(args[0])?;
+            let code = |s: &str| -> Result<u8, String> {
+                if s.eq_ignore_ascii_case("none") {
+                    return Ok(0xFF);
+                }
+                keymap::key_by_name(s).map(|k| k.row * 8 + k.col).ok_or_else(|| format!("unknown key '{s}'"))
+            };
+            let codes = [code(args[1])?, code(args[2])?, code(args[3])?, code(args[4])?];
+            // S37: fire is an ue2emu-only extension (C64Port::set_wasd_fire), not part of MATRIX_WASD_TO_JOY, so
+            // it's an optional 6th argument rather than always required; omitted means "no fire key".
+            let fire = match args.get(5) {
+                Some(s) => code(s)?,
+                None => 0xFF,
+            };
+            ControlCmd::WasdToJoy(port, codes, fire)
         }
         "usbmouse" => {
             arity(2, 3)?;
@@ -451,6 +472,10 @@ pub fn execute(t: &mut dyn Target, cmd: &ControlCmd, out: &mut dyn Write) -> Res
         })?,
         ControlCmd::JoySet(port, lines) => t.inputs(TimedInputs {
             events: vec![(0, HostInput::JoystickPort { port: *port, lines: *lines })],
+            len_ms: 0,
+        })?,
+        ControlCmd::WasdToJoy(port, codes, fire) => t.inputs(TimedInputs {
+            events: vec![(0, HostInput::WasdToJoy { port: *port, codes: *codes, fire: *fire })],
             len_ms: 0,
         })?,
         ControlCmd::UsbMouse(dx, dy, buttons) => t.inputs(TimedInputs {
@@ -1275,6 +1300,31 @@ mod tests {
             ("joy-hold 2", "'joy-hold' takes 2 argument(s), got 1"),
             ("joy-release", "'joy-release' takes 1 argument(s), got 0"),
             ("joy-release 2 up", "'joy-release' takes 1 argument(s), got 2"),
+        ];
+        for (line, want) in cases {
+            let err = parse_line(line).expect_err(line);
+            assert!(err.contains(want), "{line:?}: got {err:?}, want {want:?}");
+        }
+    }
+
+    /// S37: `wasd-joy <port> <up> <down> <left> <right> [fire]`.
+    #[test]
+    fn wasd_joy_parses_keys_and_none() {
+        use ControlCmd::*;
+        let ok = |l: &str| parse_line(l).unwrap();
+        let code = |name: &str| { let mk = k(name); mk.row * 8 + mk.col };
+        let dirs = [code("w"), code("s"), code("a"), code("d")];
+        assert_eq!(ok("wasd-joy 1 w s a d"), Some(WasdToJoy(1, dirs, 0xFF)), "no fire argument: 0xFF");
+        assert_eq!(ok("wasd-joy 2 none none none none"), Some(WasdToJoy(2, [0xFF; 4], 0xFF)));
+        assert_eq!(ok("wasd-joy 1 w s a none"), Some(WasdToJoy(1, [dirs[0], dirs[1], dirs[2], 0xFF], 0xFF)));
+        assert_eq!(ok("wasd-joy 1 w s a d return"), Some(WasdToJoy(1, dirs, code("return"))), "6th arg is fire");
+        assert_eq!(ok("wasd-joy 1 w s a d none"), Some(WasdToJoy(1, dirs, 0xFF)), "explicit 'none' fire, same as omitted");
+        let cases = [
+            ("wasd-joy 3 w s a d", "'3' is not a control port (1 or 2)"),
+            ("wasd-joy 1 w s a", "'wasd-joy' takes 5-6 argument(s), got 4"),
+            ("wasd-joy 1 w s a jump", "unknown key 'jump'"),
+            ("wasd-joy 1 w s a d return space", "'wasd-joy' takes 5-6 argument(s), got 7"),
+            ("wasd-joy 1 w s a d jump", "unknown key 'jump'"),
         ];
         for (line, want) in cases {
             let err = parse_line(line).expect_err(line);

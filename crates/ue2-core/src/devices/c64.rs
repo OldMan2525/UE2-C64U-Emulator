@@ -221,6 +221,19 @@ const PALETTE_RGB_SIZE: u32 = 0x40;
 const MATRIX_RESTORE: u32 = 9;
 /// MATRIX_KEYB [10]: freeze, the freezer cartridges' button (keyboard_usb.cc:228; W4-CART).
 const MATRIX_FREEZE: u32 = 10;
+/// MATRIX_WASD_TO_JOY [11..15]: four keyCodes (`row * 8 + col`, `keymap_normal` convention), up/down/left/right in
+/// that order; 0xFF means no key assigned. S37, not confirmed against the firmware (docs/specs/S37 §2).
+const MATRIX_WASD_TO_JOY: u32 = 11;
+const MATRIX_WASD_TO_JOY_END: u32 = 15;
+/// MATRIX_WASD_TO_JOY sentinel: no key assigned to this direction (S37).
+const WASD_NONE: u8 = 0xFF;
+/// S37 §2: default control port keys-as-joystick drives, 0-based (`joysticks`/`joy_lines` index), until
+/// `set_wasd_to_joy_port` says otherwise. Unconfirmed against the firmware; port 2 matches the pre-S36 default
+/// single-port `HostInput::Joystick`. **Not necessarily right for your game** — S37 §2 never pinned down whether
+/// the real firmware always targets one port or follows some other selection (e.g. reusing U64II_KEYB_JOY's
+/// select bit); until that's confirmed, `wasd-joy`'s port argument is how you point it at whichever port the
+/// software you're testing actually reads.
+const WASD_JOY_PORT_DEFAULT: usize = 1;
 
 /// 00 §1c M8: ROM windows read back what was written. `U64Machine::read_cpu_block` loads from them
 /// (u64_machine.cc:92-107, ELF 0x52A14-0x52A88) and the monitor caches them (u64_memory_backend.cc:74-83).
@@ -316,8 +329,20 @@ pub struct C64Port {
     roms: [RegTable; 3],
     /// Physical joystick lines of control ports 1 and 2, active low (S36).
     joysticks: [u8; 2],
-    /// What the CIA sees on ports 1 and 2: the physical lines ANDed with C64_JOY1/2_SWOUT. Shared with `U64Io`,
-    /// whose U64II_KEYB_JOY reads it (S36).
+    /// MATRIX_WASD_TO_JOY's four keyCodes, up/down/left/right; `WASD_NONE` for an unassigned direction (S37).
+    wasd_to_joy: [u8; 4],
+    /// A fire keyCode for keys-as-joystick, or `WASD_NONE`. Not part of MATRIX_WASD_TO_JOY — that register is only
+    /// four bytes, with no documented fire slot, and there's no vendored firmware source confirming one exists
+    /// anywhere else. This is an ue2emu-only extension, `C64Port` state with no backing register byte, added
+    /// because keys-as-joystick is not very usable without a fire key (S37).
+    wasd_fire: u8,
+    /// Keys-as-joystick lines on `wasd_to_joy_port`, active low, idle 0xFF (S37).
+    keys_joy: u8,
+    /// Which control port `keys_joy` applies to, 0-based. Defaults to `WASD_JOY_PORT_DEFAULT`; `set_wasd_to_joy_port`
+    /// overrides it (S37).
+    wasd_to_joy_port: usize,
+    /// What the CIA sees on ports 1 and 2: the physical lines ANDed with C64_JOY1/2_SWOUT, and on
+    /// `wasd_to_joy_port` also with `keys_joy` (S36, S37). Shared with `U64Io`, whose U64II_KEYB_JOY reads it (S36).
     joy_lines: Arc<[AtomicU8; 2]>,
     /// Host RESTORE key held.
     restore: bool,
@@ -356,6 +381,10 @@ impl C64Port {
                 RegTable::new("char-rom", ROM_4K),
             ],
             joysticks: [0xFF; 2],
+            wasd_to_joy: [WASD_NONE; 4],
+            wasd_fire: WASD_NONE,
+            keys_joy: 0xFF,
+            wasd_to_joy_port: WASD_JOY_PORT_DEFAULT,
             joy_lines: Arc::new([AtomicU8::new(0xFF), AtomicU8::new(0xFF)]),
             restore: false,
             drives: [DriveRegs::new(0), DriveRegs::new(1)],
@@ -417,10 +446,33 @@ impl C64Port {
 
     /// Host key at the `U64Io::set_key` matrix position: the backend's keyboard, or CIA1 of the T0 stub.
     pub fn set_key(&mut self, row: u8, col: u8, down: bool) {
+        // S37: fold WASD-as-joystick in first. §2 is unconfirmed on whether the real firmware also still delivers
+        // the keyboard-matrix press when a key is one of the four assigned directions; this keeps doing that too
+        // rather than suppressing it, since suppressing is the harder change to undo if it turns out wrong.
+        self.apply_wasd_to_joy(row, col, down);
         match &mut self.backend {
             Some(b) => b.set_key(row, col, down),
             None => self.dma.set_key(row, col, down),
         }
+    }
+
+    /// S37: if `(row, col)`'s keyCode (`row * 8 + col`) matches one of `MATRIX_WASD_TO_JOY`'s four slots (bits
+    /// 0-3) or `wasd_fire` (bit 4, the ue2emu-only extension), fold the press or release into `keys_joy` and
+    /// recombine (`apply_joysticks`). Positions outside the 8x8 matrix, and keyCodes that match nothing assigned
+    /// (including every slot while `WASD_NONE`, since a real keyCode is always < 0xFF), do nothing.
+    fn apply_wasd_to_joy(&mut self, row: u8, col: u8, down: bool) {
+        if row >= 8 || col >= 8 {
+            return;
+        }
+        let code = row * 8 + col;
+        let bit = if code == self.wasd_fire { Some(4) } else { self.wasd_to_joy.iter().position(|&k| k == code) };
+        let Some(bit) = bit else { return };
+        if down {
+            self.keys_joy &= !(1 << bit);
+        } else {
+            self.keys_joy |= 1 << bit;
+        }
+        self.apply_joysticks();
     }
 
     /// What a DMA read of C64 address `addr` returns, without side effects (the backend's bus or the T0 stub).
@@ -440,6 +492,27 @@ impl C64Port {
     /// The port lines the CIA sees, for `U64Io`'s U64II_KEYB_JOY (S36).
     pub fn joy_lines(&self) -> Arc<[AtomicU8; 2]> {
         self.joy_lines.clone()
+    }
+
+    /// S37: write MATRIX_WASD_TO_JOY's four slots (up, down, left, right) directly, as the `wasd-joy` control
+    /// command does, bypassing the keyboard. `WASD_NONE` (0xFF) leaves a direction unassigned.
+    pub fn set_wasd_to_joy(&mut self, codes: [u8; 4]) {
+        self.wasd_to_joy = codes;
+    }
+
+    /// S37: set (or, with `WASD_NONE`, clear) the fire keyCode. See `wasd_fire`'s field doc for why this isn't
+    /// part of `set_wasd_to_joy` / `MATRIX_WASD_TO_JOY`.
+    pub fn set_wasd_fire(&mut self, code: u8) {
+        self.wasd_fire = code;
+    }
+
+    /// S37: which control port (1 or 2) keys-as-joystick drives; out-of-range values are ignored. See
+    /// `WASD_JOY_PORT_DEFAULT` for why this needs to be settable at all right now.
+    pub fn set_wasd_to_joy_port(&mut self, port: u8) {
+        if let 1 | 2 = port {
+            self.wasd_to_joy_port = usize::from(port - 1);
+            self.apply_joysticks();
+        }
     }
 
     /// Host RESTORE key, ORed into the NMI line (S14 §6).
@@ -597,6 +670,11 @@ impl C64Port {
             if let Some(b) = &mut self.backend {
                 b.set_freeze_button(val != 0);
             }
+        } else if (MATRIX_WASD_TO_JOY..MATRIX_WASD_TO_JOY_END).contains(&reg) {
+            // A key already held under the old code for this slot keeps driving the joystick until released; a
+            // key held under the new code only starts contributing on its next press (S37, unconfirmed against
+            // the firmware).
+            self.wasd_to_joy[(reg - MATRIX_WASD_TO_JOY) as usize] = val;
         }
     }
 
@@ -626,9 +704,11 @@ impl C64Port {
         }
     }
 
-    /// Wired AND of the physical stick and the firmware's software output on each port (S36).
+    /// Wired AND of the physical stick and the firmware's software output on each port (S36), and on
+    /// `wasd_to_joy_port` also the keys-as-joystick lines (S37).
     fn apply_joysticks(&mut self) {
-        let lines = [self.core.get(JOY1_SWOUT) & self.joysticks[0], self.core.get(JOY2_SWOUT) & self.joysticks[1]];
+        let mut lines = [self.core.get(JOY1_SWOUT) & self.joysticks[0], self.core.get(JOY2_SWOUT) & self.joysticks[1]];
+        lines[self.wasd_to_joy_port] &= self.keys_joy;
         for (cell, v) in self.joy_lines.iter().zip(lines) {
             cell.store(v, Ordering::Relaxed);
         }
@@ -1155,6 +1235,84 @@ mod tests {
         let mut rig = Rig::new(install);
         rig.w32(0x1010_030B, 0x0403_0201);
         assert_eq!([0x30B, 0x30C, 0x30D, 0x30E].map(|o| rig.r8(0x1010_0000 + o)), [1, 2, 3, 4]);
+    }
+
+    /// S37: a keyCode assigned in MATRIX_WASD_TO_JOY folds into the default port's lines and still reaches the
+    /// backend as an ordinary keypress (S37 §2's suppression question, taken as "no" for now); an unassigned
+    /// keyCode does neither. `apply_joysticks` re-emits both ports every time (S36), so both `Call::Joystick`s
+    /// appear on every fold, even though only one port's value moves.
+    #[test]
+    fn s37_wasd_to_joy_folds_into_the_keys_port() {
+        let mut b = Bench::new();
+        // up=5, down=6, left=7, right=8 (order per MATRIX_WASD_TO_JOY, S37 §2).
+        for (i, code) in [5u8, 6, 7, 8].into_iter().enumerate() {
+            b.w8(MATRIX_ADDR + 0x0B + i as u32, code);
+        }
+        b.mock.take(); // discard the four config writes; C64Port has no backend call for them
+
+        b.port().set_key(0, 5, true); // code 5: up
+        assert_eq!(b.mock.take(), [Call::Joystick(1, 0xFF), Call::Joystick(2, 0xFE), Call::Key(0, 5, true)]);
+
+        b.port().set_key(0, 6, true); // code 6: down, held together with up
+        assert_eq!(b.mock.take(), [Call::Joystick(1, 0xFF), Call::Joystick(2, 0xFC), Call::Key(0, 6, true)]);
+
+        b.port().set_key(0, 5, false); // release up; down stays held
+        assert_eq!(b.mock.take(), [Call::Joystick(1, 0xFF), Call::Joystick(2, 0xFD), Call::Key(0, 5, false)]);
+
+        b.port().set_key(1, 1, true); // code 9: not assigned, an ordinary key
+        assert_eq!(b.mock.take(), [Call::Key(1, 1, true)], "no joystick call for an unassigned key");
+
+        b.port().set_joystick(1, 0xF7); // a physical stick on port 1 is unaffected by keys-as-joystick
+        assert_eq!(b.mock.take(), [Call::Joystick(1, 0xF7), Call::Joystick(2, 0xFD)]);
+    }
+
+    /// S37: `wasd_fire` folds into bit 4 the same way the four direction slots fold into bits 0-3, and combines
+    /// with them normally (fire held together with a direction clears both bits).
+    #[test]
+    fn s37_wasd_fire_folds_into_bit_4() {
+        let mut b = Bench::new();
+        for (i, code) in [5u8, 6, 7, 8].into_iter().enumerate() {
+            b.w8(MATRIX_ADDR + 0x0B + i as u32, code);
+        }
+        b.port().set_wasd_fire(9); // e.g. RETURN
+        b.mock.take();
+
+        b.port().set_key(1, 1, true); // code 9: fire
+        assert_eq!(b.mock.take(), [Call::Joystick(1, 0xFF), Call::Joystick(2, 0xEF), Call::Key(1, 1, true)]);
+
+        b.port().set_key(0, 5, true); // code 5: up, held together with fire
+        assert_eq!(b.mock.take(), [Call::Joystick(1, 0xFF), Call::Joystick(2, 0xEE), Call::Key(0, 5, true)]);
+
+        b.port().set_key(1, 1, false); // release fire; up stays held
+        assert_eq!(b.mock.take(), [Call::Joystick(1, 0xFF), Call::Joystick(2, 0xFE), Call::Key(1, 1, false)]);
+
+        // Clearing the config is a plain field write with no backend call of its own — it only stops the next
+        // press from matching; it doesn't touch bits already folded into `keys_joy`.
+        b.port().set_wasd_fire(WASD_NONE);
+        assert_eq!(b.mock.take(), []);
+        b.port().set_key(1, 1, true); // code 9 is unassigned again: an ordinary key, no joystick effect
+        assert_eq!(b.mock.take(), [Call::Key(1, 1, true)]);
+    }
+
+    /// S37: `set_wasd_to_joy_port` retargets which port `keys_joy` lands on, including a key already held —
+    /// `keys_joy` is one register regardless of port, so a held direction follows the switch immediately rather
+    /// than waiting for its next press.
+    #[test]
+    fn s37_wasd_to_joy_port_is_settable() {
+        let mut b = Bench::new();
+        for (i, code) in [5u8, 6, 7, 8].into_iter().enumerate() {
+            b.w8(MATRIX_ADDR + 0x0B + i as u32, code);
+        }
+        b.mock.take();
+
+        b.port().set_wasd_to_joy_port(1); // target port 1 instead of WASD_JOY_PORT_DEFAULT (port 2)
+        assert_eq!(b.mock.take(), [Call::Joystick(1, 0xFF), Call::Joystick(2, 0xFF)]);
+
+        b.port().set_key(0, 7, true); // code 7: left
+        assert_eq!(b.mock.take(), [Call::Joystick(1, 0xFB), Call::Joystick(2, 0xFF), Call::Key(0, 7, true)]);
+
+        b.port().set_wasd_to_joy_port(2); // switch back to port 2 with left still held
+        assert_eq!(b.mock.take(), [Call::Joystick(1, 0xFF), Call::Joystick(2, 0xFB)], "the held key follows the port");
     }
 
     #[test]
