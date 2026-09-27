@@ -76,6 +76,10 @@ pub struct SystemBus {
     pub log_unmapped: bool,
     /// Recorded accesses not yet printed; the machine drains them after each instruction.
     pub accesses: Vec<Access>,
+    /// Address ranges (inclusive) to print immediately on every access, regardless of `trace_io`. Unlike
+    /// `trace_io`, this does not disable idle-skip — for finding out what a firmware write does without paying
+    /// for a full `--log io` trace of the whole boot (`--watch`, docs/status/tooling.md).
+    pub watch: Vec<(u32, u32)>,
     /// Unmapped access counts by address (filled only while `log_unmapped`).
     pub unmapped: BTreeMap<u32, UnmappedCount>,
     /// Set by every CPU write to DDR, every IO access and every device tick; the idle skip clears it where it looks
@@ -133,6 +137,7 @@ impl SystemBus {
             trace_io: false,
             log_unmapped: false,
             accesses: Vec::new(),
+            watch: Vec::new(),
             unmapped: BTreeMap::new(),
             idle_dirty: true,
         }
@@ -174,11 +179,18 @@ impl SystemBus {
                 if self.trace_io {
                     self.record(false, addr, val, true, true);
                 }
+                if self.is_watched(addr) {
+                    let name = self.io.devices[dev].name();
+                    eprintln!("watch R {addr:#010x} {val:#04x} {name}+{off:#x} @{:#010x} now={}", self.pc, self.now);
+                }
                 val
             }
             None => {
                 if self.trace_io || self.log_unmapped {
                     self.record(false, addr, 0, false, true);
+                }
+                if self.is_watched(addr) {
+                    eprintln!("watch R {addr:#010x} unmapped @{:#010x} now={}", self.pc, self.now);
                 }
                 0
             }
@@ -213,10 +225,17 @@ impl SystemBus {
                 if self.trace_io {
                     self.record(true, addr, val, true, true);
                 }
+                if self.is_watched(addr) {
+                    let name = self.io.devices[dev].name();
+                    eprintln!("watch W {addr:#010x} {val:#04x} {name}+{off:#x} @{:#010x} now={}", self.pc, self.now);
+                }
             }
             None => {
                 if self.trace_io || self.log_unmapped {
                     self.record(true, addr, val, false, true);
+                }
+                if self.is_watched(addr) {
+                    eprintln!("watch W {addr:#010x} {val:#04x} unmapped @{:#010x} now={}", self.pc, self.now);
                 }
             }
         }
@@ -224,6 +243,13 @@ impl SystemBus {
 
     /// Log bookkeeping for one byte access. `mapped`: something decodes the address; `io`: it is on the IO bus.
     #[cold]
+    /// Whether `addr` falls in any `--watch` range. A handful of ranges checked per access is cheap enough to
+    /// leave idle-skip on, unlike `trace_io` — this is meant for exactly the case where a full `--log io` trace
+    /// would make the boot impractically slow to sit through.
+    fn is_watched(&self, addr: u32) -> bool {
+        self.watch.iter().any(|&(lo, hi)| (lo..=hi).contains(&addr))
+    }
+
     fn record(&mut self, write: bool, addr: u32, val: u8, mapped: bool, io: bool) {
         let mut unmapped = false;
         if !mapped && self.log_unmapped {

@@ -20,7 +20,7 @@ mod window;
 
 use std::path::PathBuf;
 
-use anyhow::{bail, Result};
+use anyhow::{bail, Context, Result};
 use clap::{Args, CommandFactory, Parser, Subcommand, ValueEnum};
 use ue2_core::machine::{LogFlags, MachineConfig};
 
@@ -118,6 +118,10 @@ struct RunArgs {
     /// Logging: unmapped, io, irq, cart (comma separated)
     #[arg(long, value_delimiter = ',')]
     log: Vec<String>,
+    /// Print every access to this address, or this inclusive hex range (`lo-hi`), without the slowdown `--log io`
+    /// causes by disabling idle-skip. Repeatable.
+    #[arg(long, value_name = "ADDR[-ADDR]")]
+    watch: Vec<String>,
     /// Which label the board wears: u64ii (default) or c64u, the same hardware with the Bling Board present
     #[arg(long, value_name = "MODEL", value_parser = ["u64ii", "c64u"])]
     board: Option<String>,
@@ -230,7 +234,22 @@ fn run(a: RunArgs) -> Result<()> {
             other => bail!("unknown --log flag '{other}' (expected unmapped, io, irq, cart)"),
         }
     }
+    let parse_hex = |s: &str| -> Result<u32> {
+        u32::from_str_radix(s.trim_start_matches("0x"), 16).with_context(|| format!("'{s}' is not a hex address"))
+    };
+    let mut watch = Vec::new();
+    for w in &a.watch {
+        let (lo, hi) = match w.split_once('-') {
+            Some((lo, hi)) => (parse_hex(lo)?, parse_hex(hi)?),
+            None => {
+                let addr = parse_hex(w)?;
+                (addr, addr)
+            }
+        };
+        watch.push((lo, hi));
+    }
     cfg.log = log;
+    cfg.watch = watch;
     let net = net::configure(a.net, &mut cfg)?;
     let (usb_dirs, usb_dir_work) = usb::configure(a.usb, &mut cfg)?;
     let c64 = c64_selected(a.c64)?;

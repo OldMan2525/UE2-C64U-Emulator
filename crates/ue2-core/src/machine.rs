@@ -57,6 +57,9 @@ pub struct MachineConfig {
     /// Record the CPU trace ring ([`TraceRing`]).
     pub trace: bool,
     pub log: LogFlags,
+    /// `--watch` address ranges (inclusive), printed on every access without disabling idle-skip the way
+    /// `log.io` does — for finding out what one specific register does without tracing a whole boot.
+    pub watch: Vec<(u32, u32)>,
     /// Fast-forward loops that cannot change anything until the next device event (docs/specs/S19-idle-skip.md).
     pub idle_skip: bool,
     /// `.cfg` files whose settings go into the flash config pages before the firmware runs, in order
@@ -80,6 +83,7 @@ impl MachineConfig {
             halt_on_fault: true,
             trace: false,
             log: LogFlags::default(),
+            watch: Vec::new(),
             idle_skip: true,
             settings: Vec::new(),
         }
@@ -299,6 +303,7 @@ impl Machine {
     pub fn from_parts(cfg: MachineConfig, mut bus: SystemBus, entry: u32, symbols: Symbols) -> Self {
         bus.trace_io = cfg.log.io;
         bus.log_unmapped = cfg.log.unmapped;
+        bus.watch = cfg.watch.clone();
         let hooks = if cfg.halt_on_fault { FaultHooks::resolve(&symbols, &bus.ram) } else { FaultHooks::NONE };
         let next_deadline = bus.next_deadline();
         Machine {
